@@ -1,0 +1,983 @@
+import React, { useMemo, useRef, useState } from 'react';
+
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
+// --- helpers -----------------------------------------------------------
+
+function parseRecipientsText(raw) {
+  if (!raw) return [];
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  return lines
+    .map((line) => {
+      const [emailPart, ...rest] = line.split(',');
+      const email = (emailPart || '').trim();
+      const name = rest.join(',').trim();
+      return { email, name: name || undefined };
+    })
+    .filter((r) => /\S+@\S+\.\S+/.test(r.email));
+}
+
+function fillTemplateClient(str, data) {
+  if (!str) return str;
+  return str.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
+    const val = data ? data[key] : undefined;
+    return val === undefined || val === null ? '' : String(val);
+  });
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function formatEta(totalRemaining, delaySeconds) {
+  const seconds = totalRemaining * delaySeconds;
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+const STEP = ({ n, title, hint }) => (
+  <div className="step-head">
+    <span className="step-num">{n}</span>
+    <div>
+      <h2>{title}</h2>
+      {hint && <p className="step-hint">{hint}</p>}
+    </div>
+  </div>
+);
+
+// --- app -----------------------------------------------------------
+
+export default function App() {
+  // sender
+  const [email, setEmail] = useState('');
+  const [appPassword, setAppPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [fromName, setFromName] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [host, setHost] = useState('smtp.gmail.com');
+  const [port, setPort] = useState('465');
+  const [secure, setSecure] = useState(true);
+
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null); // {ok, error}
+
+  // recipients
+  const [recipientsRaw, setRecipientsRaw] = useState('');
+  const fileInputRef = useRef(null);
+  const recipients = useMemo(() => parseRecipientsText(recipientsRaw), [recipientsRaw]);
+
+  // message
+  const [mailType, setMailType] = useState('text'); // 'text' | 'html'
+  const [subject, setSubject] = useState('');
+  const [bodyText, setBodyText] = useState('');
+  const [bodyHtml, setBodyHtml] = useState('');
+  const [showHtmlPreview, setShowHtmlPreview] = useState(false);
+  const [includeSignature, setIncludeSignature] = useState(false);
+  const [signatureMode, setSignatureMode] = useState('card'); // 'card' | 'custom'
+  const [signature, setSignature] = useState(''); // used when signatureMode === 'custom'
+
+  // structured "card" signature fields — mirrors a typical business signature block
+  const [sigClosing, setSigClosing] = useState('Best regards,');
+  const [sigName, setSigName] = useState('');
+  const [sigTitle, setSigTitle] = useState('');
+  const [sigPhone, setSigPhone] = useState('');
+  const [sigEmail, setSigEmail] = useState('');
+  const [sigWebsite, setSigWebsite] = useState('');
+  const [sigTagline, setSigTagline] = useState('');
+
+  // logos shown in the signature — each is either a hosted image URL or a
+  // file uploaded from the device (converted to a base64 data URI so no
+  // backend changes are needed to embed it in the HTML signature).
+  const [sigLogos, setSigLogos] = useState([]); // { id, mode: 'url'|'upload', url, dataUri, fileName }
+
+  const [showPreview, setShowPreview] = useState(false);
+
+  // attachments
+  const [attachments, setAttachments] = useState([]);
+  const attachInputRef = useRef(null);
+
+  // delay
+  const [delayChoice, setDelayChoice] = useState('60'); // '60' | '30' | 'custom'
+  const [customDelay, setCustomDelay] = useState('45');
+  const delaySeconds = delayChoice === 'custom' ? Math.max(0, Number(customDelay) || 0) : Number(delayChoice);
+
+  // The signature's rich HTML form — built whenever the "card" builder has
+  // data, independent of whether the compose body itself is plain text or
+  // HTML. This is what lets a logo show up even if the user is writing in
+  // the plain-text tab.
+  const signatureHtml = useMemo(() => {
+    const contactLine = [sigPhone && `Contact: ${sigPhone}`].filter(Boolean).join(' | ');
+    const websiteLine = [sigWebsite, sigTagline].filter(Boolean).join(' | ');
+
+    const lines = [];
+    if (sigClosing) lines.push(`<p style="margin:0 0 4px;">${escapeHtml(sigClosing)}</p>`);
+    if (sigName) lines.push(`<p style="margin:0 0 16px;">${escapeHtml(sigName)}</p>`);
+    lines.push('<hr style="border:none;border-top:1px solid #ddd;margin:0 0 12px;" />');
+    const block = [];
+    if (sigName) block.push(`<div style="font-weight:600;color:#222;">${escapeHtml(sigName)}</div>`);
+    if (sigTitle) block.push(`<div style="color:#777;">${escapeHtml(sigTitle)}</div>`);
+    if (sigPhone) block.push(`<div style="color:#555;">Contact: <a href="tel:${escapeHtml(sigPhone)}" style="color:#2454C7;">${escapeHtml(sigPhone)}</a></div>`);
+    if (sigEmail) block.push(`<div style="color:#555;">Email: <a href="mailto:${escapeHtml(sigEmail)}" style="color:#2454C7;">${escapeHtml(sigEmail)}</a></div>`);
+    lines.push(`<div style="font-size:13px;line-height:1.6;">${block.join('\n')}</div>`);
+
+    const logoSrcs = sigLogos
+      .map((logo) => (logo.mode === 'upload' ? logo.dataUri : logo.url))
+      .filter(Boolean);
+    if (logoSrcs.length > 0) {
+      // Each logo sits in a fixed-size box (36px tall, up to 130px wide) so
+      // mismatched source image sizes don't distort the signature row —
+      // the image is scaled to fit inside, never stretched or cropped.
+      const divider =
+        '<span style="display:inline-block;width:1px;height:32px;background:#ccc;margin:0 14px;vertical-align:middle;"></span>';
+      const logoRow = logoSrcs
+        .map(
+          (src) =>
+            `<span style="display:inline-flex;align-items:center;justify-content:center;height:36px;max-width:130px;vertical-align:middle;overflow:hidden;"><img src="${escapeHtml(
+              src
+            )}" alt="" style="max-height:36px;max-width:130px;width:auto;height:auto;object-fit:contain;display:block;border:0;" /></span>`
+        )
+        .join(divider);
+      lines.push(`<div style="margin:16px 0;">${logoRow}</div>`);
+    }
+
+    if (websiteLine) {
+      lines.push('<hr style="border:none;border-top:1px solid #eee;margin:12px 0;" />');
+      const siteLink = sigWebsite
+        ? `<a href="https://${escapeHtml(sigWebsite.replace(/^https?:\/\//, ''))}" style="color:#2454C7;">${escapeHtml(sigWebsite)}</a>`
+        : '';
+      lines.push(
+        `<div style="font-size:13px;color:#777;">Explore: ${siteLink}${sigTagline ? ` | ${escapeHtml(sigTagline)}` : ''}</div>`
+      );
+    }
+    return lines.join('\n');
+  }, [sigClosing, sigName, sigTitle, sigPhone, sigEmail, sigWebsite, sigTagline, sigLogos]);
+
+  const signatureTextPlain = useMemo(() => {
+    const contactLine = [sigPhone && `Contact: ${sigPhone}`].filter(Boolean).join(' | ');
+    const websiteLine = [sigWebsite, sigTagline].filter(Boolean).join(' | ');
+    const lines = [];
+    if (sigClosing) lines.push(sigClosing);
+    if (sigName) lines.push(sigName);
+    lines.push('');
+    if (sigName) lines.push(sigName);
+    if (sigTitle) lines.push(sigTitle);
+    if (contactLine) lines.push(contactLine);
+    if (sigEmail) lines.push(`Email: ${sigEmail}`);
+    if (websiteLine) {
+      lines.push('');
+      lines.push(`Explore: ${websiteLine}`);
+    }
+    return lines.join('\n');
+  }, [sigClosing, sigName, sigTitle, sigPhone, sigEmail, sigWebsite, sigTagline]);
+
+  // true if the card signature has at least one usable logo — logos require
+  // an HTML email, so when this is true we send/preview as HTML even if the
+  // compose tab is set to "Plain text".
+  const sigHasLogo = useMemo(
+    () => sigLogos.some((logo) => (logo.mode === 'upload' ? logo.dataUri : logo.url)),
+    [sigLogos]
+  );
+  const logoForcesHtml = includeSignature && signatureMode === 'card' && sigHasLogo;
+  const effectiveIsHtml = mailType === 'html' || logoForcesHtml;
+
+  // builds the final signature string that gets sent — either the free-text
+  // "custom" signature, or an assembled block from the structured fields.
+  const signatureForSend = useMemo(() => {
+    if (!includeSignature) return '';
+    if (signatureMode === 'custom') return signature;
+    return effectiveIsHtml ? signatureHtml : signatureTextPlain;
+  }, [includeSignature, signatureMode, signature, effectiveIsHtml, signatureHtml, signatureTextPlain]);
+
+  // the body actually sent/previewed as HTML — the user's own HTML if they
+  // wrote it, or their plain-text body auto-converted to simple HTML if
+  // logos forced this email into HTML mode.
+  const effectiveBodyHtml = useMemo(() => {
+    if (mailType === 'html') return bodyHtml;
+    if (logoForcesHtml) return escapeHtml(bodyText).replace(/\n/g, '<br/>');
+    return bodyHtml;
+  }, [mailType, bodyHtml, bodyText, logoForcesHtml]);
+
+  // send state
+  const [isSending, setIsSending] = useState(false);
+  const [log, setLog] = useState([]); // {recipient, status, error}
+  const [sentCount, setSentCount] = useState(0);
+  const [failedCount, setFailedCount] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(-1);
+  const [sendError, setSendError] = useState('');
+  const abortRef = useRef(null);
+
+  const canTest = email.trim() && appPassword.trim() && !testing;
+  const canSend =
+    email.trim() &&
+    appPassword.trim() &&
+    subject.trim() &&
+    recipients.length > 0 &&
+    (mailType === 'text' ? bodyText.trim() : bodyHtml.trim()) &&
+    !isSending;
+
+  async function handleTestConnection() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/test-connection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, appPassword, host, port, secure }),
+      });
+      const data = await res.json();
+      setTestResult(data.ok ? { ok: true } : { ok: false, error: data.error });
+    } catch (err) {
+      setTestResult({ ok: false, error: err.message });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  function handleCsvUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      const firstLine = text.split(/\r?\n/, 1)[0] || '';
+      const looksLikeHeader = /^\s*(email|e-mail)/i.test(firstLine) && !/\S+@\S+\.\S+/.test(firstLine);
+      const body = looksLikeHeader ? text.split(/\r?\n/).slice(1).join('\n') : text;
+      setRecipientsRaw((prev) => (prev.trim() ? `${prev.trim()}\n${body.trim()}` : body.trim()));
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  function handleAttachmentChange(e) {
+    const files = Array.from(e.target.files || []);
+    setAttachments((prev) => [...prev, ...files]);
+    e.target.value = '';
+  }
+
+  function removeAttachment(idx) {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function addLogo() {
+    setSigLogos((prev) => [
+      ...prev,
+      { id: `logo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, mode: 'url', url: '', dataUri: '', fileName: '' },
+    ]);
+  }
+
+  function removeLogo(id) {
+    setSigLogos((prev) => prev.filter((l) => l.id !== id));
+  }
+
+  function updateLogo(id, patch) {
+    setSigLogos((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  }
+
+  function handleLogoFileUpload(id, file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateLogo(id, { dataUri: String(reader.result || ''), fileName: file.name });
+    };
+    reader.readAsDataURL(file); // -> base64 data: URI, embeddable directly in the HTML signature
+  }
+
+  function resetSendState() {
+    setLog([]);
+    setSentCount(0);
+    setFailedCount(0);
+    setTotalCount(0);
+    setCurrentIndex(-1);
+    setSendError('');
+  }
+
+  async function handleSend() {
+    resetSendState();
+    setIsSending(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const form = new FormData();
+    form.append('email', email.trim());
+    form.append('appPassword', appPassword);
+    form.append('host', host);
+    form.append('port', port);
+    form.append('secure', String(secure));
+    form.append('fromName', fromName.trim());
+    form.append('subject', subject);
+    form.append('bodyText', bodyText);
+    form.append('bodyHtml', effectiveBodyHtml);
+    form.append('isHtml', String(effectiveIsHtml));
+    form.append('includeSignature', String(includeSignature));
+    form.append('signature', signatureForSend);
+    form.append('delaySeconds', String(delaySeconds));
+    form.append('recipients', JSON.stringify(recipients));
+    attachments.forEach((file) => form.append('attachments', file));
+
+    try {
+      const res = await fetch(`${API_BASE}/api/send`, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Server responded with ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const evt = JSON.parse(line);
+          handleEvent(evt);
+        }
+      }
+      if (buffer.trim()) {
+        handleEvent(JSON.parse(buffer));
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setSendError(err.message || 'Something went wrong while sending.');
+      }
+    } finally {
+      setIsSending(false);
+      abortRef.current = null;
+    }
+  }
+
+  function handleEvent(evt) {
+    if (evt.type === 'start') {
+      setTotalCount(evt.total);
+    } else if (evt.type === 'progress') {
+      setCurrentIndex(evt.index);
+      setLog((prev) => [...prev, { recipient: evt.recipient, status: evt.status, error: evt.error }]);
+      if (evt.status === 'sent') setSentCount((c) => c + 1);
+      else setFailedCount((c) => c + 1);
+    } else if (evt.type === 'done' || evt.type === 'stopped') {
+      setSentCount(evt.sentCount);
+      setFailedCount(evt.failedCount);
+      setTotalCount(evt.total);
+    } else if (evt.type === 'error') {
+      setSendError(evt.error);
+    }
+  }
+
+  function handleStop() {
+    abortRef.current?.abort();
+  }
+
+  const doneCount = sentCount + failedCount;
+  const progressPct = totalCount ? Math.round((doneCount / totalCount) * 100) : 0;
+  const remaining = totalCount ? totalCount - doneCount - (isSending ? 1 : 0) : 0;
+
+  return (
+    <div className="app">
+      <div className="airmail-stripe" aria-hidden="true" />
+      <header className="app-header">
+        <div className="brand">
+          <span className="brand-mark">✦</span>
+          <div>
+            <h1>Dispatch</h1>
+            <p>A steady hand for sending mail, one message at a time.</p>
+          </div>
+        </div>
+      </header>
+
+      <main className="app-main">
+        {/* Step 1 — Sender */}
+        <section className="card">
+          <STEP n="1" title="Connect your account" hint="Use a Gmail address with an App Password — not your regular login password." />
+
+          <div className="grid-2">
+            <label className="field">
+              <span>Your Gmail address</span>
+              <input
+                type="email"
+                placeholder="you@gmail.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="username"
+              />
+            </label>
+
+            <label className="field">
+              <span>App password</span>
+              <div className="password-row">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="16-character app password"
+                  value={appPassword}
+                  onChange={(e) => setAppPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+                <button type="button" className="link-btn" onClick={() => setShowPassword((v) => !v)}>
+                  {showPassword ? 'Hide' : 'Show'}
+                </button>
+              </div>
+            </label>
+
+            <label className="field">
+              <span>Display name (optional)</span>
+              <input
+                type="text"
+                placeholder="How your name appears to recipients"
+                value={fromName}
+                onChange={(e) => setFromName(e.target.value)}
+              />
+            </label>
+
+            <div className="field">
+              <span>Connection</span>
+              <div className="test-row">
+                <button type="button" className="btn secondary" disabled={!canTest} onClick={handleTestConnection}>
+                  {testing ? 'Checking…' : 'Test connection'}
+                </button>
+                {testResult?.ok && <span className="pill success">Connected</span>}
+                {testResult && !testResult.ok && <span className="pill danger">Failed</span>}
+              </div>
+            </div>
+          </div>
+
+          {testResult && !testResult.ok && <p className="error-text">{testResult.error}</p>}
+
+          <button type="button" className="link-btn" onClick={() => setShowAdvanced((v) => !v)}>
+            {showAdvanced ? 'Hide advanced SMTP settings' : 'Advanced SMTP settings'}
+          </button>
+
+          {showAdvanced && (
+            <div className="grid-3 advanced">
+              <label className="field">
+                <span>SMTP host</span>
+                <input type="text" value={host} onChange={(e) => setHost(e.target.value)} />
+              </label>
+              <label className="field">
+                <span>Port</span>
+                <input type="number" value={port} onChange={(e) => setPort(e.target.value)} />
+              </label>
+              <label className="field checkbox-field">
+                <span>Use TLS (secure)</span>
+                <input type="checkbox" checked={secure} onChange={(e) => setSecure(e.target.checked)} />
+              </label>
+            </div>
+          )}
+
+          <p className="helper-text">
+            Don&rsquo;t have an app password? Turn on 2-Step Verification in your Google Account, then create one at{' '}
+            <em>myaccount.google.com → Security → App passwords</em>.
+          </p>
+        </section>
+
+        {/* Step 2 — Recipients */}
+        <section className="card">
+          <STEP n="2" title="Add recipients" hint="One per line. Add a name after a comma to personalize with {{name}}." />
+
+          <textarea
+            className="textarea recipients-area"
+            rows={6}
+            placeholder={'jane@example.com, Jane\njohn@example.com'}
+            value={recipientsRaw}
+            onChange={(e) => setRecipientsRaw(e.target.value)}
+          />
+
+          <div className="recipients-footer">
+            <button type="button" className="btn secondary" onClick={() => fileInputRef.current?.click()}>
+              Upload .csv or .txt
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.txt"
+              hidden
+              onChange={handleCsvUpload}
+            />
+            <span className="count-pill">
+              {recipients.length} valid recipient{recipients.length === 1 ? '' : 's'}
+            </span>
+          </div>
+        </section>
+
+        {/* Step 3 — Message */}
+        <section className="card">
+          <STEP n="3" title="Write the message" hint="Choose plain text for a personal feel, or HTML for formatted layouts." />
+
+          <div className="tabs" role="tablist">
+            <button
+              type="button"
+              className={`tab ${mailType === 'text' ? 'active' : ''}`}
+              onClick={() => setMailType('text')}
+            >
+              Plain text
+            </button>
+            <button
+              type="button"
+              className={`tab ${mailType === 'html' ? 'active' : ''}`}
+              onClick={() => setMailType('html')}
+            >
+              HTML
+            </button>
+          </div>
+
+          <label className="field">
+            <span>Subject</span>
+            <input
+              type="text"
+              placeholder="A subject your recipients will recognize"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+            />
+          </label>
+
+          {mailType === 'text' ? (
+            <label className="field">
+              <span>Body</span>
+              <textarea
+                className="textarea"
+                rows={10}
+                placeholder={'Hi {{name}},\n\nWrite your message here…'}
+                value={bodyText}
+                onChange={(e) => setBodyText(e.target.value)}
+              />
+            </label>
+          ) : (
+            <>
+              <label className="field">
+                <span>HTML source</span>
+                <textarea
+                  className="textarea mono"
+                  rows={10}
+                  placeholder={'<p>Hi {{name}},</p>\n<p>Write your message here…</p>'}
+                  value={bodyHtml}
+                  onChange={(e) => setBodyHtml(e.target.value)}
+                />
+              </label>
+              <button type="button" className="link-btn" onClick={() => setShowHtmlPreview((v) => !v)}>
+                {showHtmlPreview ? 'Hide preview' : 'Show preview'}
+              </button>
+              {showHtmlPreview && (
+                <div className="html-preview" dangerouslySetInnerHTML={{ __html: bodyHtml }} />
+              )}
+            </>
+          )}
+
+          <div className="signature-block">
+            <label className="checkbox-field inline">
+              <input
+                type="checkbox"
+                checked={includeSignature}
+                onChange={(e) => setIncludeSignature(e.target.checked)}
+              />
+              <span>Add a signature footer</span>
+            </label>
+
+            {includeSignature && (
+              <>
+                <div className="tabs small">
+                  <button
+                    type="button"
+                    className={`tab ${signatureMode === 'card' ? 'active' : ''}`}
+                    onClick={() => setSignatureMode('card')}
+                  >
+                    Business card
+                  </button>
+                  <button
+                    type="button"
+                    className={`tab ${signatureMode === 'custom' ? 'active' : ''}`}
+                    onClick={() => setSignatureMode('custom')}
+                  >
+                    Custom text
+                  </button>
+                </div>
+
+                {signatureMode === 'card' ? (
+                  <div className="sig-grid">
+                    <label className="field">
+                      <span>Closing line</span>
+                      <input type="text" value={sigClosing} onChange={(e) => setSigClosing(e.target.value)} />
+                    </label>
+                    <label className="field">
+                      <span>Full name</span>
+                      <input
+                        type="text"
+                        placeholder="Shivangi Mishra"
+                        value={sigName}
+                        onChange={(e) => setSigName(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Title</span>
+                      <input
+                        type="text"
+                        placeholder="Sr. Business Analyst | AWS Services"
+                        value={sigTitle}
+                        onChange={(e) => setSigTitle(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Phone</span>
+                      <input
+                        type="text"
+                        placeholder="+91 9569504008"
+                        value={sigPhone}
+                        onChange={(e) => setSigPhone(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Signature email</span>
+                      <input
+                        type="text"
+                        placeholder="shivangi.mishra@virtuecloud.io"
+                        value={sigEmail}
+                        onChange={(e) => setSigEmail(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Website</span>
+                      <input
+                        type="text"
+                        placeholder="virtuecloud.io"
+                        value={sigWebsite}
+                        onChange={(e) => setSigWebsite(e.target.value)}
+                      />
+                    </label>
+                    <label className="field sig-tagline">
+                      <span>Tagline</span>
+                      <input
+                        type="text"
+                        placeholder="AWS Advanced Partner"
+                        value={sigTagline}
+                        onChange={(e) => setSigTagline(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                ) : null}
+
+                {signatureMode === 'card' && (
+                  <div className="logo-section">
+                    <div className="logo-section-head">
+                      <span>Logos</span>
+                      <button type="button" className="link-btn" onClick={addLogo}>
+                        + Add logo
+                      </button>
+                    </div>
+
+                    {sigLogos.length === 0 && (
+                      <p className="helper-text">
+                        No logos yet. Add your company logo and any partner badges — they'll sit in a row, separated
+                        by a divider, just like in the sample.
+                      </p>
+                    )}
+
+                    {sigLogos.map((logo, idx) => {
+                      const preview = logo.mode === 'upload' ? logo.dataUri : logo.url;
+                      return (
+                        <div key={logo.id} className="logo-row">
+                          <div className="logo-row-top">
+                            <span className="logo-row-label">Logo {idx + 1}</span>
+                            <div className="tabs tiny">
+                              <button
+                                type="button"
+                                className={`tab ${logo.mode === 'url' ? 'active' : ''}`}
+                                onClick={() => updateLogo(logo.id, { mode: 'url' })}
+                              >
+                                Image URL
+                              </button>
+                              <button
+                                type="button"
+                                className={`tab ${logo.mode === 'upload' ? 'active' : ''}`}
+                                onClick={() => updateLogo(logo.id, { mode: 'upload' })}
+                              >
+                                Upload
+                              </button>
+                            </div>
+                            <button type="button" className="link-btn danger" onClick={() => removeLogo(logo.id)}>
+                              Remove
+                            </button>
+                          </div>
+
+                          {logo.mode === 'url' ? (
+                            <input
+                              type="text"
+                              placeholder="https://example.com/logo.png"
+                              value={logo.url}
+                              onChange={(e) => updateLogo(logo.id, { url: e.target.value })}
+                            />
+                          ) : (
+                            <div className="logo-upload-row">
+                              <label className="btn secondary file-btn">
+                                Choose file
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  hidden
+                                  onChange={(e) => handleLogoFileUpload(logo.id, e.target.files?.[0])}
+                                />
+                              </label>
+                              <span className="file-size">{logo.fileName || 'No file chosen'}</span>
+                            </div>
+                          )}
+
+                          {preview && (
+                            <div className="logo-preview-box">
+                              <img src={preview} alt="" />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    <p className="helper-text">
+                      Uploaded logos are embedded directly in the email as image data, so no external hosting is
+                      needed — but this makes the email heavier and a few older clients (like desktop Outlook) may
+                      not render them. A hosted image URL is the most reliable option if you have one.
+                    </p>
+                  </div>
+                )}
+
+                {signatureMode === 'custom' && (
+                  <textarea
+                    className="textarea"
+                    rows={4}
+                    placeholder={'Best,\nYour Name\nYour Company'}
+                    value={signature}
+                    onChange={(e) => setSignature(e.target.value)}
+                  />
+                )}
+
+                <div className="sig-preview">
+                  {effectiveIsHtml ? (
+                    <div dangerouslySetInnerHTML={{ __html: signatureForSend }} />
+                  ) : (
+                    <pre>{signatureForSend}</pre>
+                  )}
+                </div>
+
+                {logoForcesHtml && mailType === 'text' && (
+                  <p className="notice-text">
+                    This signature includes a logo, so this email will be sent as HTML — your plain-text body
+                    will be converted automatically. Switch to the HTML tab above if you'd like full control over
+                    formatting.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </section>
+
+        {/* Step 4 — Attachments */}
+        <section className="card">
+          <STEP n="4" title="Attachments" hint="Optional. Same files are sent with every email." />
+
+          <button type="button" className="btn secondary" onClick={() => attachInputRef.current?.click()}>
+            Add files
+          </button>
+          <input ref={attachInputRef} type="file" multiple hidden onChange={handleAttachmentChange} />
+
+          {attachments.length > 0 && (
+            <ul className="attachment-list">
+              {attachments.map((file, idx) => (
+                <li key={`${file.name}-${idx}`}>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-size">{(file.size / 1024).toFixed(0)} KB</span>
+                  <button type="button" className="link-btn danger" onClick={() => removeAttachment(idx)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* Step 5 — Send */}
+        <section className="card">
+          <STEP n="5" title="Set the pace and send" hint="Sending slowly, with a gap between messages, keeps you well within Gmail's limits and out of spam folders." />
+
+          <div className="delay-options">
+            {[
+              { id: '60', label: '1 email / minute' },
+              { id: '30', label: '1 email / 30 sec' },
+              { id: 'custom', label: 'Custom' },
+            ].map((opt) => (
+              <label key={opt.id} className={`delay-option ${delayChoice === opt.id ? 'active' : ''}`}>
+                <input
+                  type="radio"
+                  name="delay"
+                  checked={delayChoice === opt.id}
+                  onChange={() => setDelayChoice(opt.id)}
+                />
+                <span>{opt.label}</span>
+              </label>
+            ))}
+            {delayChoice === 'custom' && (
+              <div className="custom-delay">
+                <input
+                  type="number"
+                  min="0"
+                  value={customDelay}
+                  onChange={(e) => setCustomDelay(e.target.value)}
+                />
+                <span>seconds between emails</span>
+              </div>
+            )}
+          </div>
+
+          {totalCount > 0 && delaySeconds > 0 && !isSending && doneCount === 0 && (
+            <p className="helper-text">
+              Estimated time for {recipients.length} recipients: ~{formatEta(recipients.length - 1, delaySeconds)}
+            </p>
+          )}
+
+          <div className="send-row">
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={!subject.trim() && !bodyText.trim() && !bodyHtml.trim()}
+              onClick={() => setShowPreview(true)}
+            >
+              Preview email
+            </button>
+            {!isSending ? (
+              <button type="button" className="btn primary" disabled={!canSend} onClick={handleSend}>
+                Send to {recipients.length || 0} recipient{recipients.length === 1 ? '' : 's'}
+              </button>
+            ) : (
+              <button type="button" className="btn danger" onClick={handleStop}>
+                Stop sending
+              </button>
+            )}
+          </div>
+
+          {sendError && <p className="error-text">{sendError}</p>}
+
+          {(isSending || totalCount > 0) && (
+            <div className="progress-block">
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <div className="progress-stats">
+                <span>{doneCount} / {totalCount} sent</span>
+                <span className="stat-success">{sentCount} delivered</span>
+                {failedCount > 0 && <span className="stat-fail">{failedCount} failed</span>}
+                {isSending && delaySeconds > 0 && remaining > 0 && (
+                  <span className="stat-eta">~{formatEta(remaining, delaySeconds)} remaining</span>
+                )}
+              </div>
+
+              {log.length > 0 && (
+                <ul className="send-log">
+                  {log.slice().reverse().map((entry, idx) => (
+                    <li key={idx} className={entry.status}>
+                      <span className="log-dot" />
+                      <span className="log-recipient">{entry.recipient}</span>
+                      <span className="log-status">
+                        {entry.status === 'sent' ? 'sent' : entry.error || 'failed'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </section>
+      </main>
+
+      <footer className="app-footer">
+        <p>Your address and app password are used only for this session and are never stored.</p>
+      </footer>
+
+      {showPreview && (
+        <PreviewModal
+          isHtml={effectiveIsHtml}
+          fromName={fromName}
+          email={email}
+          subject={subject}
+          bodyText={bodyText}
+          bodyHtml={effectiveBodyHtml}
+          signature={signatureForSend}
+          includeSignature={includeSignature}
+          recipient={recipients[0]}
+          attachments={attachments}
+          onClose={() => setShowPreview(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function PreviewModal({
+  isHtml,
+  fromName,
+  email,
+  subject,
+  bodyText,
+  bodyHtml,
+  signature,
+  includeSignature,
+  recipient,
+  attachments,
+  onClose,
+}) {
+  const sampleData = recipient || { email: 'jane@example.com', name: 'Jane' };
+  const renderedSubject = fillTemplateClient(subject, sampleData) || '(no subject)';
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>Preview</h3>
+          <button type="button" className="link-btn" onClick={onClose}>Close</button>
+        </div>
+
+        <div className="preview-meta">
+          <div><span>From</span> {fromName ? `${fromName} <${email || 'you@gmail.com'}>` : email || 'you@gmail.com'}</div>
+          <div><span>To</span> {sampleData.email}{recipient ? '' : ' (sample recipient)'}</div>
+          <div><span>Subject</span> {renderedSubject}</div>
+          {attachments.length > 0 && (
+            <div>
+              <span>Attachments</span> {attachments.map((f) => f.name).join(', ')}
+            </div>
+          )}
+        </div>
+
+        <div className="preview-body">
+          {isHtml ? (
+            <div
+              dangerouslySetInnerHTML={{
+                __html:
+                  fillTemplateClient(bodyHtml, sampleData) +
+                  (includeSignature && signature ? `<br/><br/>${signature}` : ''),
+              }}
+            />
+          ) : (
+            <pre>
+              {fillTemplateClient(bodyText, sampleData) +
+                (includeSignature && signature ? `\n\n${signature}` : '')}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
