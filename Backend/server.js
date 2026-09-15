@@ -64,6 +64,80 @@ app.post('/api/test-connection', async (req, res) => {
     }
 });
 
+app.post('/api/send-single', upload.array('attachments'), async (req, res) => {
+    try {
+        const {
+            email,
+            appPassword,
+            host,
+            port,
+            secure,
+            fromName,
+            subject,
+            bodyText,
+            bodyHtml,
+            isHtml,
+            includeSignature,
+            signature,
+            recipient,
+        } = req.body;
+
+        if (!email || !appPassword) {
+            return res.status(400).json({ ok: false, error: 'Sender email and app password are required.' });
+        }
+
+        let data = {};
+        if (typeof recipient === 'string') {
+            try {
+                data = JSON.parse(recipient);
+            } catch {
+                data = { email: recipient.trim() };
+            }
+        } else if (typeof recipient === 'object' && recipient !== null) {
+            data = recipient;
+        }
+
+        const toEmail = data.email ? String(data.email).trim() : '';
+        if (!toEmail) {
+            return res.status(400).json({ ok: false, error: 'Valid recipient email is required.' });
+        }
+
+        const useHtml = isHtml === 'true' || isHtml === true;
+        const useSignature = includeSignature === 'true' || includeSignature === true;
+
+        const attachments = (req.files || []).map((f) => ({
+            filename: f.originalname,
+            content: f.buffer,
+            contentType: f.mimetype,
+        }));
+
+        const transporter = buildTransport({ email, appPassword, host, port, secure });
+
+        const finalSubject = fillTemplate(subject, data);
+        const signaturePart = useSignature && signature ? fillTemplate(signature, data) : '';
+
+        let mail = {
+            from: fromName && fromName.trim() ? `"${fromName.trim()}" <${email}>` : email,
+            to: toEmail,
+            subject: finalSubject,
+            attachments,
+        };
+
+        if (useHtml) {
+            const htmlBody = fillTemplate(bodyHtml, data);
+            mail.html = signaturePart ? `${htmlBody}<br/><br/>${signaturePart}` : htmlBody;
+        } else {
+            const textBody = fillTemplate(bodyText, data);
+            mail.text = signaturePart ? `${textBody}\n\n${signaturePart}` : textBody;
+        }
+
+        await transporter.sendMail(mail);
+        return res.json({ ok: true, recipient: toEmail });
+    } catch (err) {
+        return res.status(500).json({ ok: false, error: err.message || 'Failed to send email.' });
+    }
+});
+
 app.post('/api/send', upload.array('attachments'), async (req, res) => {
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');

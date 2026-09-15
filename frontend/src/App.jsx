@@ -307,65 +307,80 @@ export default function App() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    const signal = controller.signal;
 
-    const form = new FormData();
-    form.append('email', email.trim());
-    form.append('appPassword', appPassword);
-    form.append('host', host);
-    form.append('port', port);
-    form.append('secure', String(secure));
-    form.append('fromName', fromName.trim());
-    form.append('subject', subject);
-    form.append('bodyText', bodyText);
-    form.append('bodyHtml', effectiveBodyHtml);
-    form.append('isHtml', String(effectiveIsHtml));
-    form.append('includeSignature', String(includeSignature));
-    form.append('signature', signatureForSend);
-    form.append('delaySeconds', String(delaySeconds));
-    form.append('recipients', JSON.stringify(recipients));
-    attachments.forEach((file) => form.append('attachments', file));
+    setTotalCount(recipients.length);
 
-    try {
-      const res = await fetch(`${API_BASE}/api/send`, {
-        method: 'POST',
-        body: form,
-        signal: controller.signal,
-      });
+    const delayMs = Math.max(0, Number(delaySeconds || 0)) * 1000;
+    let localSent = 0;
+    let localFailed = 0;
 
-      if (!res.ok || !res.body) {
-        const text = await res.text().catch(() => '');
-        throw new Error(text || `Server responded with ${res.status}`);
+    for (let i = 0; i < recipients.length; i++) {
+      if (signal.aborted) {
+        break;
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      setCurrentIndex(i);
+      const target = recipients[i];
 
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+      const form = new FormData();
+      form.append('email', email.trim());
+      form.append('appPassword', appPassword);
+      form.append('host', host);
+      form.append('port', port);
+      form.append('secure', String(secure));
+      form.append('fromName', fromName.trim());
+      form.append('subject', subject);
+      form.append('bodyText', bodyText);
+      form.append('bodyHtml', effectiveBodyHtml);
+      form.append('isHtml', String(effectiveIsHtml));
+      form.append('includeSignature', String(includeSignature));
+      form.append('signature', signatureForSend);
+      form.append('recipient', JSON.stringify(target));
+      attachments.forEach((file) => form.append('attachments', file));
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const evt = JSON.parse(line);
-          handleEvent(evt);
+      try {
+        const res = await fetch(`${API_BASE}/api/send-single`, {
+          method: 'POST',
+          body: form,
+          signal,
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || `Server returned ${res.status}`);
+        }
+
+        localSent++;
+        setSentCount(localSent);
+        setLog((prev) => [...prev, { recipient: target.email, status: 'sent' }]);
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          break;
+        }
+        localFailed++;
+        setFailedCount(localFailed);
+        setLog((prev) => [...prev, { recipient: target.email, status: 'failed', error: err.message }]);
+      }
+
+      const isLast = i === recipients.length - 1;
+      if (!isLast && delayMs > 0 && !signal.aborted) {
+        try {
+          await new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, delayMs);
+            signal.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(new DOMException('Aborted', 'AbortError'));
+            }, { once: true });
+          });
+        } catch (e) {
+          if (e.name === 'AbortError') break;
         }
       }
-      if (buffer.trim()) {
-        handleEvent(JSON.parse(buffer));
-      }
-    } catch (err) {
-      if (err.name !== 'AbortError') {
-        setSendError(err.message || 'Something went wrong while sending.');
-      }
-    } finally {
-      setIsSending(false);
-      abortRef.current = null;
     }
+
+    setIsSending(false);
+    abortRef.current = null;
   }
 
   function handleEvent(evt) {
