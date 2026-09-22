@@ -58,6 +58,7 @@ const STEP = ({ n, title, hint }) => (
 
 export default function App() {
   // sender
+  const [provider, setProvider] = useState('gmail'); // 'gmail' | 'zoho' | 'zoho_in' | 'office365' | 'custom'
   const [email, setEmail] = useState('');
   const [appPassword, setAppPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -66,6 +67,15 @@ export default function App() {
   const [host, setHost] = useState('smtp.gmail.com');
   const [port, setPort] = useState('465');
   const [secure, setSecure] = useState(true);
+
+  function handleProviderChange(preset) {
+    setProvider(preset.id);
+    if (preset.id !== 'custom') {
+      setHost(preset.host);
+      setPort(preset.port);
+      setSecure(preset.secure);
+    }
+  }
 
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null); // {ok, error}
@@ -424,14 +434,33 @@ export default function App() {
       <main className="app-main">
         {/* Step 1 — Sender */}
         <section className="card">
-          <STEP n="1" title="Connect your account" hint="Use a Gmail address with an App Password — not your regular login password." />
+          <STEP n="1" title="Connect your account" hint="Select your email provider and enter your credentials." />
+
+          <div className="tabs" style={{ marginBottom: '16px', display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            {[
+              { id: 'gmail', label: 'Gmail', host: 'smtp.gmail.com', port: '465', secure: true },
+              { id: 'zoho', label: 'Zoho Mail (.com)', host: 'smtppro.zoho.com', port: '465', secure: true },
+              { id: 'zoho_in', label: 'Zoho Mail (.in)', host: 'smtppro.zoho.in', port: '465', secure: true },
+              { id: 'office365', label: 'Microsoft 365', host: 'smtp.office365.com', port: '587', secure: false },
+              { id: 'custom', label: 'Custom SMTP' },
+            ].map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`tab ${provider === p.id ? 'active' : ''}`}
+                onClick={() => handleProviderChange(p)}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
 
           <div className="grid-2">
             <label className="field">
-              <span>Your Gmail address</span>
+              <span>Your email address</span>
               <input
                 type="email"
-                placeholder="you@gmail.com"
+                placeholder={provider.startsWith('zoho') ? 'aws-connect@virtuecloud-aws.com' : 'you@example.com'}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="username"
@@ -439,11 +468,11 @@ export default function App() {
             </label>
 
             <label className="field">
-              <span>App password</span>
+              <span>App password / Password</span>
               <div className="password-row">
                 <input
                   type={showPassword ? 'text' : 'password'}
-                  placeholder="16-character app password"
+                  placeholder="App-specific password"
                   value={appPassword}
                   onChange={(e) => setAppPassword(e.target.value)}
                   autoComplete="current-password"
@@ -500,8 +529,23 @@ export default function App() {
           )}
 
           <p className="helper-text">
-            Don&rsquo;t have an app password? Turn on 2-Step Verification in your Google Account, then create one at{' '}
-            <em>myaccount.google.com → Security → App passwords</em>.
+            {provider.startsWith('zoho') ? (
+              <>
+                For <strong>Zoho Mail</strong>: Use your full Zoho address (e.g. <code>aws-connect@virtuecloud-aws.com</code>) and your Zoho Application-Specific Password. Generate one at{' '}
+                <a href="https://accounts.zoho.com" target="_blank" rel="noreferrer">accounts.zoho.com</a> (or <a href="https://accounts.zoho.in" target="_blank" rel="noreferrer">accounts.zoho.in</a>) → <em>Security → Application-Specific Passwords</em>.
+              </>
+            ) : provider === 'gmail' ? (
+              <>
+                Don&rsquo;t have an app password? Turn on 2-Step Verification in your Google Account, then create one at{' '}
+                <em>myaccount.google.com → Security → App passwords</em>.
+              </>
+            ) : provider === 'office365' ? (
+              <>
+                For <strong>Microsoft 365 / Outlook</strong>: Uses <code>smtp.office365.com</code> on port 587. Ensure Authenticated SMTP is enabled in your M365 admin center.
+              </>
+            ) : (
+              <>Custom SMTP settings configured (Host: {host}, Port: {port}).</>
+            )}
           </p>
         </section>
 
