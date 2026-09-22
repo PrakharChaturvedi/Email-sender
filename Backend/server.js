@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import nodemailer from 'nodemailer';
+import tls from 'tls';
 
 const app = express();
 const PORT = process.env.PORT || 5055;
@@ -61,6 +62,142 @@ app.post('/api/test-connection', async (req, res) => {
         res.json({ ok: true });
     } catch (err) {
         res.status(400).json({ ok: false, error: err.message });
+    }
+});
+
+function checkRepliesIMAP({ email, appPassword, host, recipients }) {
+    return new Promise((resolve) => {
+        const cleanEmail = email ? String(email).trim() : '';
+        const cleanPass = appPassword ? String(appPassword).replace(/\s+/g, '') : '';
+        
+        let imapHost = 'imap.gmail.com';
+        if (host && host.includes('zoho')) {
+            imapHost = host.includes('.in') ? 'imap.zoho.in' : 'imap.zoho.com';
+        } else if (host && host.includes('office365')) {
+            imapHost = 'outlook.office365.com';
+        } else if (host && host.includes('.')) {
+            imapHost = host.replace(/^smtp\./i, 'imap.');
+        }
+
+        const repliedSet = new Set();
+        const targets = recipients.map((r) => String(r).toLowerCase().trim()).filter(Boolean);
+        if (targets.length === 0) return resolve([]);
+
+        let socket;
+        let tagIndex = 1;
+        let buffer = '';
+        let step = 'CONNECT';
+        let currentTag = '';
+        let searchIndex = 0;
+
+        const timer = setTimeout(() => {
+            if (socket) socket.destroy();
+            resolve(Array.from(repliedSet));
+        }, 12000); // 12s safety timeout
+
+        try {
+            socket = tls.connect(993, imapHost, { rejectUnauthorized: false }, () => {
+                // Connected
+            });
+
+            const sendCmd = (cmd) => {
+                const tag = `A${tagIndex++}`;
+                currentTag = tag;
+                socket.write(`${tag} ${cmd}\r\n`);
+                return tag;
+            };
+
+            socket.on('data', (chunk) => {
+                buffer += chunk.toString('utf8');
+                const lines = buffer.split(/\r?\n/);
+                buffer = lines.pop(); // remainder
+
+                for (const line of lines) {
+                    if (step === 'CONNECT' && line.startsWith('* OK')) {
+                        step = 'LOGIN';
+                        sendCmd(`LOGIN "${cleanEmail}" "${cleanPass}"`);
+                    } else if (step === 'LOGIN' && line.startsWith(currentTag)) {
+                        if (line.includes(' OK')) {
+                            step = 'SELECT';
+                            sendCmd('SELECT INBOX');
+                        } else {
+                            clearTimeout(timer);
+                            socket.destroy();
+                            return resolve(Array.from(repliedSet));
+                        }
+                    } else if (step === 'SELECT' && line.startsWith(currentTag)) {
+                        if (line.includes(' OK')) {
+                            step = 'SEARCHING';
+                            searchIndex = 0;
+                            const targetEmail = targets[searchIndex];
+                            sendCmd(`SEARCH FROM "${targetEmail}"`);
+                        } else {
+                            clearTimeout(timer);
+                            socket.destroy();
+                            return resolve(Array.from(repliedSet));
+                        }
+                    } else if (step === 'SEARCHING') {
+                        if (line.startsWith('* SEARCH')) {
+                            const ids = line.replace('* SEARCH', '').trim();
+                            if (ids.length > 0) {
+                                repliedSet.add(targets[searchIndex]);
+                            }
+                        } else if (line.startsWith(currentTag)) {
+                            searchIndex++;
+                            if (searchIndex < targets.length) {
+                                const targetEmail = targets[searchIndex];
+                                sendCmd(`SEARCH FROM "${targetEmail}"`);
+                            } else {
+                                step = 'LOGOUT';
+                                sendCmd('LOGOUT');
+                            }
+                        }
+                    } else if (step === 'LOGOUT' && line.startsWith(currentTag)) {
+                        clearTimeout(timer);
+                        socket.destroy();
+                        return resolve(Array.from(repliedSet));
+                    }
+                }
+            });
+
+            socket.on('error', () => {
+                clearTimeout(timer);
+                resolve(Array.from(repliedSet));
+            });
+
+            socket.on('close', () => {
+                clearTimeout(timer);
+                resolve(Array.from(repliedSet));
+            });
+        } catch {
+            clearTimeout(timer);
+            resolve(Array.from(repliedSet));
+        }
+    });
+}
+
+app.post('/api/check-replies', async (req, res) => {
+    try {
+        const { email, appPassword, host, recipients } = req.body || {};
+        if (!email || !appPassword) {
+            return res.status(400).json({ ok: false, error: 'Email and app password are required.' });
+        }
+
+        const recipientList = Array.isArray(recipients) ? recipients : [];
+        if (recipientList.length === 0) {
+            return res.json({ ok: true, repliedEmails: [] });
+        }
+
+        const repliedEmails = await checkRepliesIMAP({
+            email,
+            appPassword,
+            host: host || 'smtp.gmail.com',
+            recipients: recipientList,
+        });
+
+        return res.json({ ok: true, repliedEmails });
+    } catch (err) {
+        return res.status(500).json({ ok: false, error: err.message || 'Failed to check replies via IMAP.' });
     }
 });
 

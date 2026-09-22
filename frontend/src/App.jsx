@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { template1 } from './templates/template1.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -62,6 +62,101 @@ const STEP = ({ n, title, hint }) => (
 // --- app -----------------------------------------------------------
 
 export default function App() {
+  // navigation
+  const [activeNavTab, setActiveNavTab] = useState('compose'); // 'compose' | 'analytics'
+  const [campaigns, setCampaigns] = useState(() => {
+    try {
+      const saved = localStorage.getItem('dispatch_campaigns');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('dispatch_campaigns', JSON.stringify(campaigns));
+    } catch {
+      /* storage full or disabled */
+    }
+  }, [campaigns]);
+
+  const [syncingCampaignId, setSyncingCampaignId] = useState(null);
+
+  async function handleSyncReplies(campaignId) {
+    const camp = campaigns.find((c) => c.id === campaignId);
+    if (!camp || !email || !appPassword) return;
+
+    setSyncingCampaignId(campaignId);
+    try {
+      const targetEmails = camp.recipients.map((r) => r.email);
+      const res = await fetch(`${API_BASE}/api/check-replies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, appPassword, host, recipients: targetEmails }),
+      });
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.repliedEmails)) {
+        const repliedSet = new Set(data.repliedEmails.map((e) => String(e).toLowerCase()));
+        setCampaigns((prev) =>
+          prev.map((c) => {
+            if (c.id !== campaignId) return c;
+            return {
+              ...c,
+              repliedEmails: Array.from(new Set([...(c.repliedEmails || []), ...data.repliedEmails])),
+              recipients: c.recipients.map((r) =>
+                repliedSet.has(r.email.toLowerCase()) ? { ...r, status: 'replied' } : r
+              ),
+            };
+          })
+        );
+      }
+    } catch (err) {
+      console.error('Failed to sync replies:', err);
+    } finally {
+      setSyncingCampaignId(null);
+    }
+  }
+
+  function handleToggleRecipientReply(campaignId, targetEmail) {
+    setCampaigns((prev) =>
+      prev.map((c) => {
+        if (c.id !== campaignId) return c;
+        const recipient = c.recipients.find((r) => r.email.toLowerCase() === targetEmail.toLowerCase());
+        if (!recipient) return c;
+        const newStatus = recipient.status === 'replied' ? 'no_reply' : 'replied';
+
+        return {
+          ...c,
+          recipients: c.recipients.map((r) =>
+            r.email.toLowerCase() === targetEmail.toLowerCase() ? { ...r, status: newStatus } : r
+          ),
+        };
+      })
+    );
+  }
+
+  function handleLaunchFollowup(camp) {
+    const unreplied = camp.recipients.filter((r) => r.status !== 'replied');
+    if (unreplied.length === 0) return;
+
+    const rawText = unreplied
+      .map((r) => (r.name ? `${r.email}, ${r.name}` : r.email))
+      .join('\n');
+
+    setRecipientsRaw(rawText);
+
+    const origSub = camp.subject || 'Follow-Up';
+    const followupSub = /^re:/i.test(origSub) ? origSub : `Re: ${origSub}`;
+    setSubject(followupSub);
+
+    setActiveNavTab('compose');
+  }
+
+  function handleDeleteCampaign(campaignId) {
+    setCampaigns((prev) => prev.filter((c) => c.id !== campaignId));
+  }
+
   // sender
   const [provider, setProvider] = useState('gmail'); // 'gmail' | 'zoho' | 'zoho_in' | 'office365' | 'custom'
   const [email, setEmail] = useState('');
@@ -408,6 +503,25 @@ export default function App() {
       }
     }
 
+    if (localSent > 0 || localFailed > 0) {
+      const newCamp = {
+        id: `camp-${Date.now()}`,
+        name: subject.trim() || 'Untitled Campaign',
+        subject: subject.trim(),
+        date: new Date().toISOString(),
+        total: recipients.length,
+        sentCount: localSent,
+        failedCount: localFailed,
+        repliedEmails: [],
+        recipients: recipients.map((r) => ({
+          email: r.email,
+          name: r.name,
+          status: 'no_reply',
+        })),
+      };
+      setCampaigns((prev) => [newCamp, ...prev]);
+    }
+
     setIsSending(false);
     abortRef.current = null;
   }
@@ -443,17 +557,47 @@ export default function App() {
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark">✦</span>
-          <div>
+          <div style={{ flex: 1 }}>
             <h1>Dispatch</h1>
             <p>A steady hand for sending mail, one message at a time.</p>
+          </div>
+          <div className="tabs nav-tabs">
+            <button
+              type="button"
+              className={`tab ${activeNavTab === 'compose' ? 'active' : ''}`}
+              onClick={() => setActiveNavTab('compose')}
+            >
+              ✉️ Compose & Send
+            </button>
+            <button
+              type="button"
+              className={`tab ${activeNavTab === 'analytics' ? 'active' : ''}`}
+              onClick={() => setActiveNavTab('analytics')}
+            >
+              📊 Campaigns & Analytics ({campaigns.length})
+            </button>
           </div>
         </div>
       </header>
 
       <main className="app-main">
-        {/* Step 1 — Sender */}
-        <section className="card">
-          <STEP n="1" title="Connect your account" hint="Select your email provider and enter your credentials." />
+        {activeNavTab === 'analytics' ? (
+          <CampaignsDashboard
+            campaigns={campaigns}
+            email={email}
+            appPassword={appPassword}
+            syncingCampaignId={syncingCampaignId}
+            onSyncReplies={handleSyncReplies}
+            onToggleRecipientReply={handleToggleRecipientReply}
+            onLaunchFollowup={handleLaunchFollowup}
+            onDeleteCampaign={handleDeleteCampaign}
+            onSwitchToCompose={() => setActiveNavTab('compose')}
+          />
+        ) : (
+          <>
+            {/* Step 1 — Sender */}
+            <section className="card">
+              <STEP n="1" title="Connect your account" hint="Select your email provider and enter your credentials." />
 
           <div className="tabs" style={{ marginBottom: '16px', display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
             {[
@@ -1041,6 +1185,8 @@ export default function App() {
             </div>
           )}
         </section>
+        </>
+        )}
       </main>
 
       <footer className="app-footer">
@@ -1063,6 +1209,285 @@ export default function App() {
           attachments={attachments}
           onClose={() => setShowPreview(false)}
         />
+      )}
+    </div>
+  );
+}
+
+function CampaignsDashboard({
+  campaigns,
+  email,
+  appPassword,
+  syncingCampaignId,
+  onSyncReplies,
+  onToggleRecipientReply,
+  onLaunchFollowup,
+  onDeleteCampaign,
+  onSwitchToCompose,
+}) {
+  const [expandedCampId, setExpandedCampId] = useState(null);
+  const [filterMode, setFilterMode] = useState('all'); // 'all' | 'replied' | 'no_reply'
+
+  const totalCampaigns = campaigns.length;
+  const totalSent = campaigns.reduce((acc, c) => acc + (c.sentCount || 0), 0);
+  const totalRecipients = campaigns.reduce((acc, c) => acc + (c.total || 0), 0);
+
+  let totalReplied = 0;
+  let totalNoReply = 0;
+  campaigns.forEach((c) => {
+    (c.recipients || []).forEach((r) => {
+      if (r.status === 'replied') totalReplied++;
+      else if (r.status === 'no_reply') totalNoReply++;
+    });
+  });
+
+  const overallReplyPct = totalSent > 0 ? Math.round((totalReplied / totalSent) * 100) : 0;
+  const overallDeliverPct = totalRecipients > 0 ? Math.round((totalSent / totalRecipients) * 100) : 0;
+
+  return (
+    <div className="analytics-dashboard">
+      <div className="dashboard-header card">
+        <div>
+          <h2>Campaign Analytics & History</h2>
+          <p className="step-hint">Track email performance, detect replies automatically, and launch follow-ups.</p>
+        </div>
+        <button type="button" className="btn primary" onClick={onSwitchToCompose}>
+          + New Campaign
+        </button>
+      </div>
+
+      {totalCampaigns === 0 ? (
+        <div className="empty-state card">
+          <span className="empty-icon">📊</span>
+          <h3>No campaigns run yet</h3>
+          <p>Send your first email campaign to see delivery stats, reply percentage graphs, and follow-up tracking here.</p>
+          <button type="button" className="btn primary" onClick={onSwitchToCompose}>
+            Compose & Send Campaign
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Stat Cards */}
+          <div className="stat-cards-grid">
+            <div className="stat-card">
+              <span className="stat-icon">🚀</span>
+              <div className="stat-info">
+                <span className="stat-val">{totalCampaigns}</span>
+                <span className="stat-lbl">Total Campaigns</span>
+              </div>
+            </div>
+
+            <div className="stat-card">
+              <span className="stat-icon">✉️</span>
+              <div className="stat-info">
+                <span className="stat-val">{totalSent}</span>
+                <span className="stat-lbl">Emails Delivered</span>
+              </div>
+            </div>
+
+            <div className="stat-card accent">
+              <span className="stat-icon">💬</span>
+              <div className="stat-info">
+                <span className="stat-val">{overallReplyPct}%</span>
+                <span className="stat-lbl">Overall Reply Rate</span>
+              </div>
+            </div>
+
+            <div className="stat-card warning">
+              <span className="stat-icon">⏳</span>
+              <div className="stat-info">
+                <span className="stat-val">{totalNoReply}</span>
+                <span className="stat-lbl">Follow-Ups Needed</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Visual Analytics Graphs */}
+          <div className="grid-2 analytics-charts">
+            {/* Chart 1: Reply Breakdown */}
+            <div className="card chart-card">
+              <h3>Reply Rate Breakdown</h3>
+              <div className="donut-chart-container">
+                <div className="progress-bar-lg">
+                  <div
+                    className="bar-fill success"
+                    style={{ width: `${overallReplyPct}%` }}
+                    title={`Replied: ${overallReplyPct}%`}
+                  />
+                  <div
+                    className="bar-fill warning"
+                    style={{ width: `${100 - overallReplyPct}%` }}
+                    title={`Unreplied: ${100 - overallReplyPct}%`}
+                  />
+                </div>
+                <div className="legend-row">
+                  <span className="legend-item"><span className="dot success" /> Replied ({totalReplied})</span>
+                  <span className="legend-item"><span className="dot warning" /> No Reply ({totalNoReply})</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Chart 2: Campaign Deliverability */}
+            <div className="card chart-card">
+              <h3>Deliverability & Success</h3>
+              <div className="donut-chart-container">
+                <div className="progress-bar-lg">
+                  <div
+                    className="bar-fill primary"
+                    style={{ width: `${overallDeliverPct}%` }}
+                  />
+                </div>
+                <div className="legend-row">
+                  <span className="legend-item"><span className="dot primary" /> Delivered ({totalSent})</span>
+                  <span className="legend-item"><span className="dot danger" /> Failed ({totalRecipients - totalSent})</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Campaign History List */}
+          <div className="card campaign-list-card">
+            <div className="card-header-row" style={{ marginBottom: '16px' }}>
+              <h3>Campaign History ({totalCampaigns})</h3>
+            </div>
+
+            <div className="campaign-items">
+              {campaigns.map((camp) => {
+                const isExpanded = expandedCampId === camp.id;
+                const campReplied = (camp.recipients || []).filter((r) => r.status === 'replied').length;
+                const campNoReply = (camp.recipients || []).filter((r) => r.status === 'no_reply').length;
+                const replyRate = camp.sentCount > 0 ? Math.round((campReplied / camp.sentCount) * 100) : 0;
+                const isSyncing = syncingCampaignId === camp.id;
+
+                const displayedRecipients = (camp.recipients || []).filter((r) => {
+                  if (filterMode === 'replied') return r.status === 'replied';
+                  if (filterMode === 'no_reply') return r.status === 'no_reply';
+                  return true;
+                });
+
+                return (
+                  <div key={camp.id} className="campaign-item-card">
+                    <div className="campaign-item-head" onClick={() => setExpandedCampId(isExpanded ? null : camp.id)}>
+                      <div className="camp-info">
+                        <span className="camp-date">{new Date(camp.date).toLocaleDateString()}</span>
+                        <h4>{camp.name}</h4>
+                        <span className="camp-sub">{camp.subject}</span>
+                      </div>
+
+                      <div className="camp-metrics">
+                        <span className="metric-pill">
+                          <span>Delivered:</span> {camp.sentCount} / {camp.total}
+                        </span>
+                        <span className={`metric-pill ${replyRate > 0 ? 'success' : ''}`}>
+                          <span>Reply Rate:</span> {replyRate}% ({campReplied})
+                        </span>
+                        <button type="button" className="link-btn">
+                          {isExpanded ? 'Hide details ▲' : 'View details ▼'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="campaign-expanded-body">
+                        <div className="action-bar">
+                          <div className="filter-tabs">
+                            <button
+                              type="button"
+                              className={`tab ${filterMode === 'all' ? 'active' : ''}`}
+                              onClick={() => setFilterMode('all')}
+                            >
+                              All ({camp.recipients.length})
+                            </button>
+                            <button
+                              type="button"
+                              className={`tab ${filterMode === 'replied' ? 'active' : ''}`}
+                              onClick={() => setFilterMode('replied')}
+                            >
+                              Replied ({campReplied})
+                            </button>
+                            <button
+                              type="button"
+                              className={`tab ${filterMode === 'no_reply' ? 'active' : ''}`}
+                              onClick={() => setFilterMode('no_reply')}
+                            >
+                              No Reply ({campNoReply})
+                            </button>
+                          </div>
+
+                          <div className="right-actions">
+                            <button
+                              type="button"
+                              className="btn secondary sm"
+                              disabled={isSyncing || !email || !appPassword}
+                              onClick={() => onSyncReplies(camp.id)}
+                              title={!email || !appPassword ? 'Enter email & password in Step 1 to auto-check IMAP' : 'Check IMAP Inbox for replies'}
+                            >
+                              {isSyncing ? 'Syncing IMAP...' : '🔄 Auto-Detect Replies'}
+                            </button>
+
+                            <button
+                              type="button"
+                              className="btn primary sm"
+                              disabled={campNoReply === 0}
+                              onClick={() => onLaunchFollowup(camp)}
+                            >
+                              ⚡ Launch Follow-Up to Unreplied ({campNoReply})
+                            </button>
+
+                            <button
+                              type="button"
+                              className="btn danger sm link-btn"
+                              onClick={() => onDeleteCampaign(camp.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="recipient-status-table-container">
+                          <table className="recipient-status-table">
+                            <thead>
+                              <tr>
+                                <th>Recipient Email</th>
+                                <th>Name</th>
+                                <th>Reply Status</th>
+                                <th>Manual Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {displayedRecipients.map((r, i) => (
+                                <tr key={i}>
+                                  <td className="mono">{r.email}</td>
+                                  <td>{r.name || '—'}</td>
+                                  <td>
+                                    {r.status === 'replied' ? (
+                                      <span className="pill success">🟢 Reply Received</span>
+                                    ) : (
+                                      <span className="pill warning">⏳ Pending Follow-Up</span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <button
+                                      type="button"
+                                      className="link-btn"
+                                      onClick={() => onToggleRecipientReply(camp.id, r.email)}
+                                    >
+                                      {r.status === 'replied' ? 'Mark as No Reply' : 'Mark as Replied'}
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
