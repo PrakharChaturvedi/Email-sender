@@ -1,6 +1,11 @@
 import React, { useMemo, useRef, useState } from 'react';
+import { template1 } from './templates/template1.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+const BUILTIN_TEMPLATES = [
+  template1,
+];
 
 // --- helpers -----------------------------------------------------------
 
@@ -96,6 +101,14 @@ export default function App() {
   const [bodyHtml, setBodyHtml] = useState('');
   const [showHtmlPreview, setShowHtmlPreview] = useState(false);
   const [includeSignature, setIncludeSignature] = useState(false);
+
+  function handleLoadTemplate(tmpl) {
+    setMailType('html');
+    setBodyHtml(tmpl.html);
+    if (!subject.trim()) {
+      setSubject(tmpl.subject);
+    }
+  }
   const [signatureMode, setSignatureMode] = useState('card'); // 'card' | 'custom'
   const [signature, setSignature] = useState(''); // used when signatureMode === 'custom'
 
@@ -588,21 +601,39 @@ export default function App() {
         <section className="card">
           <STEP n="3" title="Write the message" hint="Choose plain text for a personal feel, or HTML for formatted layouts." />
 
-          <div className="tabs" role="tablist">
-            <button
-              type="button"
-              className={`tab ${mailType === 'text' ? 'active' : ''}`}
-              onClick={() => setMailType('text')}
-            >
-              Plain text
-            </button>
-            <button
-              type="button"
-              className={`tab ${mailType === 'html' ? 'active' : ''}`}
-              onClick={() => setMailType('html')}
-            >
-              HTML
-            </button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '20px' }}>
+            <div className="tabs" role="tablist" style={{ marginBottom: 0 }}>
+              <button
+                type="button"
+                className={`tab ${mailType === 'text' ? 'active' : ''}`}
+                onClick={() => setMailType('text')}
+              >
+                Plain text
+              </button>
+              <button
+                type="button"
+                className={`tab ${mailType === 'html' ? 'active' : ''}`}
+                onClick={() => setMailType('html')}
+              >
+                HTML
+              </button>
+            </div>
+
+            <div className="template-bar" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ink-soft)' }}>Templates:</span>
+              {BUILTIN_TEMPLATES.map((tmpl) => (
+                <button
+                  key={tmpl.id}
+                  type="button"
+                  className="btn secondary"
+                  style={{ padding: '5px 12px', fontSize: '12.5px', borderRadius: '999px', height: '32px' }}
+                  onClick={() => handleLoadTemplate(tmpl)}
+                  title={`Load ${tmpl.name}`}
+                >
+                  {tmpl.icon} {tmpl.name}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="field">
