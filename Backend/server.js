@@ -73,6 +73,8 @@ app.post('/api/send-single', upload.array('attachments'), async (req, res) => {
             port,
             secure,
             fromName,
+            cc,
+            bcc,
             subject,
             bodyText,
             bodyHtml,
@@ -115,6 +117,8 @@ app.post('/api/send-single', upload.array('attachments'), async (req, res) => {
 
         const finalSubject = fillTemplate(subject, data);
         const signaturePart = useSignature && signature ? fillTemplate(signature, data) : '';
+        const finalCc = fillTemplate(cc || data.cc || '', data);
+        const finalBcc = fillTemplate(bcc || data.bcc || '', data);
 
         let mail = {
             from: fromName && fromName.trim() ? `"${fromName.trim()}" <${email}>` : email,
@@ -122,6 +126,8 @@ app.post('/api/send-single', upload.array('attachments'), async (req, res) => {
             subject: finalSubject,
             attachments,
         };
+        if (finalCc && finalCc.trim()) mail.cc = finalCc.trim();
+        if (finalBcc && finalBcc.trim()) mail.bcc = finalBcc.trim();
 
         if (useHtml) {
             const htmlBody = fillTemplate(bodyHtml, data);
@@ -172,6 +178,8 @@ app.post('/api/send', upload.array('attachments'), async (req, res) => {
             port,
             secure,
             fromName,
+            cc,
+            bcc,
             subject,
             bodyText,
             bodyHtml,
@@ -233,6 +241,8 @@ app.post('/api/send', upload.array('attachments'), async (req, res) => {
 
             const finalSubject = fillTemplate(subject, data);
             const signaturePart = useSignature && signature ? fillTemplate(signature, data) : '';
+            const finalCc = fillTemplate(cc || data.cc || '', data);
+            const finalBcc = fillTemplate(bcc || data.bcc || '', data);
 
             let mail = {
                 from: fromName && fromName.trim() ? `"${fromName.trim()}" <${email}>` : email,
@@ -240,6 +250,8 @@ app.post('/api/send', upload.array('attachments'), async (req, res) => {
                 subject: finalSubject,
                 attachments,
             };
+            if (finalCc && finalCc.trim()) mail.cc = finalCc.trim();
+            if (finalBcc && finalBcc.trim()) mail.bcc = finalBcc.trim();
 
             if (useHtml) {
                 const htmlBody = fillTemplate(bodyHtml, data);

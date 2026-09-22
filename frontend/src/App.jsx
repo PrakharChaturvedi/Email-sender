@@ -88,6 +88,10 @@ export default function App() {
   // message
   const [mailType, setMailType] = useState('text'); // 'text' | 'html'
   const [subject, setSubject] = useState('');
+  const [cc, setCc] = useState('');
+  const [bcc, setBcc] = useState('');
+  const [showCc, setShowCc] = useState(false);
+  const [showBcc, setShowBcc] = useState(false);
   const [bodyText, setBodyText] = useState('');
   const [bodyHtml, setBodyHtml] = useState('');
   const [showHtmlPreview, setShowHtmlPreview] = useState(false);
@@ -340,6 +344,8 @@ export default function App() {
       form.append('port', port);
       form.append('secure', String(secure));
       form.append('fromName', fromName.trim());
+      form.append('cc', cc.trim());
+      form.append('bcc', bcc.trim());
       form.append('subject', subject);
       form.append('bodyText', bodyText);
       form.append('bodyHtml', effectiveBodyHtml);
@@ -599,15 +605,59 @@ export default function App() {
             </button>
           </div>
 
-          <label className="field">
-            <span>Subject</span>
+          <div className="field">
+            <div className="field-top-bar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+              <span style={{ color: 'var(--ink-soft)', fontWeight: 600, fontSize: '13px' }}>Subject</span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  type="button"
+                  className={`pill-toggle ${showCc || cc ? 'active' : ''}`}
+                  onClick={() => setShowCc((v) => !v)}
+                  title="Toggle Carbon Copy (CC)"
+                >
+                  Cc
+                </button>
+                <button
+                  type="button"
+                  className={`pill-toggle ${showBcc || bcc ? 'active' : ''}`}
+                  onClick={() => setShowBcc((v) => !v)}
+                  title="Toggle Blind Carbon Copy (BCC)"
+                >
+                  Bcc
+                </button>
+              </div>
+            </div>
             <input
               type="text"
               placeholder="A subject your recipients will recognize"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
             />
-          </label>
+          </div>
+
+          {(showCc || cc) && (
+            <div className="field animate-fade" style={{ marginTop: '14px' }}>
+              <span>CC (Carbon Copy)</span>
+              <input
+                type="text"
+                placeholder="manager@example.com, {{cc_email}}"
+                value={cc}
+                onChange={(e) => setCc(e.target.value)}
+              />
+            </div>
+          )}
+
+          {(showBcc || bcc) && (
+            <div className="field animate-fade" style={{ marginTop: '14px' }}>
+              <span>BCC (Blind Carbon Copy)</span>
+              <input
+                type="text"
+                placeholder="audit@example.com"
+                value={bcc}
+                onChange={(e) => setBcc(e.target.value)}
+              />
+            </div>
+          )}
 
           {mailType === 'text' ? (
             <label className="field">
@@ -680,7 +730,7 @@ export default function App() {
                       <span>Full name</span>
                       <input
                         type="text"
-                        placeholder="Shivangi Mishra"
+                        placeholder="John Doe"
                         value={sigName}
                         onChange={(e) => setSigName(e.target.value)}
                       />
@@ -689,7 +739,7 @@ export default function App() {
                       <span>Title</span>
                       <input
                         type="text"
-                        placeholder="Sr. Business Analyst | AWS Services"
+                        placeholder="Senior Business Analyst"
                         value={sigTitle}
                         onChange={(e) => setSigTitle(e.target.value)}
                       />
@@ -698,7 +748,7 @@ export default function App() {
                       <span>Phone</span>
                       <input
                         type="text"
-                        placeholder="+91 9569504008"
+                        placeholder="+1 (555) 019-2834"
                         value={sigPhone}
                         onChange={(e) => setSigPhone(e.target.value)}
                       />
@@ -707,7 +757,7 @@ export default function App() {
                       <span>Signature email</span>
                       <input
                         type="text"
-                        placeholder="shivangi.mishra@virtuecloud.io"
+                        placeholder="john.doe@example.com"
                         value={sigEmail}
                         onChange={(e) => setSigEmail(e.target.value)}
                       />
@@ -716,7 +766,7 @@ export default function App() {
                       <span>Website</span>
                       <input
                         type="text"
-                        placeholder="virtuecloud.io"
+                        placeholder="example.com"
                         value={sigWebsite}
                         onChange={(e) => setSigWebsite(e.target.value)}
                       />
@@ -971,6 +1021,8 @@ export default function App() {
           isHtml={effectiveIsHtml}
           fromName={fromName}
           email={email}
+          cc={cc}
+          bcc={bcc}
           subject={subject}
           bodyText={bodyText}
           bodyHtml={effectiveBodyHtml}
@@ -989,6 +1041,8 @@ function PreviewModal({
   isHtml,
   fromName,
   email,
+  cc,
+  bcc,
   subject,
   bodyText,
   bodyHtml,
@@ -1000,6 +1054,8 @@ function PreviewModal({
 }) {
   const sampleData = recipient || { email: 'jane@example.com', name: 'Jane' };
   const renderedSubject = fillTemplateClient(subject, sampleData) || '(no subject)';
+  const renderedCc = fillTemplateClient(cc, sampleData);
+  const renderedBcc = fillTemplateClient(bcc, sampleData);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -1010,8 +1066,10 @@ function PreviewModal({
         </div>
 
         <div className="preview-meta">
-          <div><span>From</span> {fromName ? `${fromName} <${email || 'you@gmail.com'}>` : email || 'you@gmail.com'}</div>
+          <div><span>From</span> {fromName ? `${fromName} <${email || 'you@example.com'}>` : email || 'you@example.com'}</div>
           <div><span>To</span> {sampleData.email}{recipient ? '' : ' (sample recipient)'}</div>
+          {renderedCc && <div><span>CC</span> {renderedCc}</div>}
+          {renderedBcc && <div><span>BCC</span> {renderedBcc}</div>}
           <div><span>Subject</span> {renderedSubject}</div>
           {attachments.length > 0 && (
             <div>
