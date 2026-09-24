@@ -157,6 +157,12 @@ export default function App() {
     setCampaigns((prev) => prev.filter((c) => c.id !== campaignId));
   }
 
+  function handleClearAllCampaigns() {
+    if (window.confirm('Are you sure you want to clear all campaign history? This cannot be undone.')) {
+      setCampaigns([]);
+    }
+  }
+
   // sender
   const [provider, setProvider] = useState('gmail'); // 'gmail' | 'zoho' | 'zoho_in' | 'office365' | 'custom'
   const [email, setEmail] = useState('');
@@ -591,6 +597,7 @@ export default function App() {
             onToggleRecipientReply={handleToggleRecipientReply}
             onLaunchFollowup={handleLaunchFollowup}
             onDeleteCampaign={handleDeleteCampaign}
+            onClearAllCampaigns={handleClearAllCampaigns}
             onSwitchToCompose={() => setActiveNavTab('compose')}
           />
         ) : (
@@ -1214,6 +1221,25 @@ export default function App() {
   );
 }
 
+function getCampaignStatus(camp) {
+  const recipients = camp.recipients || [];
+  const totalRecipients = camp.total || recipients.length || 0;
+  const repliedCount = recipients.filter((r) => r.status === 'replied').length;
+  const failedCount = camp.failedCount || 0;
+
+  if (failedCount > 0 && camp.sentCount === 0) {
+    return { statusKey: 'failed', label: 'Failed', colorClass: 'pill danger', icon: '🔴' };
+  }
+  if (repliedCount === totalRecipients && totalRecipients > 0) {
+    return { statusKey: 'completed', label: 'Completed (100% Replied)', colorClass: 'pill success', icon: '🟢' };
+  }
+  if (repliedCount > 0) {
+    const pending = totalRecipients - repliedCount;
+    return { statusKey: 'needs_followup', label: `Needs Follow-Up (${pending} pending)`, colorClass: 'pill info', icon: '🔵' };
+  }
+  return { statusKey: 'no_replies', label: 'No Replies Yet', colorClass: 'pill warning', icon: '🟠' };
+}
+
 function CampaignsDashboard({
   campaigns,
   email,
@@ -1223,10 +1249,14 @@ function CampaignsDashboard({
   onToggleRecipientReply,
   onLaunchFollowup,
   onDeleteCampaign,
+  onClearAllCampaigns,
   onSwitchToCompose,
 }) {
   const [expandedCampId, setExpandedCampId] = useState(null);
-  const [filterMode, setFilterMode] = useState('all'); // 'all' | 'replied' | 'no_reply'
+  const [recipientFilterMode, setRecipientFilterMode] = useState('all'); // 'all' | 'replied' | 'no_reply'
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'needs_followup' | 'completed' | 'no_replies'
+  const [sortBy, setSortBy] = useState('newest'); // 'newest' | 'oldest' | 'reply_rate' | 'recipients'
 
   const totalCampaigns = campaigns.length;
   const totalSent = campaigns.reduce((acc, c) => acc + (c.sentCount || 0), 0);
@@ -1244,16 +1274,65 @@ function CampaignsDashboard({
   const overallReplyPct = totalSent > 0 ? Math.round((totalReplied / totalSent) * 100) : 0;
   const overallDeliverPct = totalRecipients > 0 ? Math.round((totalSent / totalRecipients) * 100) : 0;
 
+  // Filter & sort campaigns
+  const filteredCampaigns = useMemo(() => {
+    return campaigns
+      .filter((camp) => {
+        // search query filter
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchName = (camp.name || '').toLowerCase().includes(q);
+          const matchSub = (camp.subject || '').toLowerCase().includes(q);
+          if (!matchName && !matchSub) return false;
+        }
+
+        // status filter
+        const st = getCampaignStatus(camp);
+        if (statusFilter === 'needs_followup' && st.statusKey !== 'needs_followup') return false;
+        if (statusFilter === 'completed' && st.statusKey !== 'completed') return false;
+        if (statusFilter === 'no_replies' && st.statusKey !== 'no_replies') return false;
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'oldest') {
+          return new Date(a.date) - new Date(b.date);
+        }
+        if (sortBy === 'reply_rate') {
+          const rA = a.sentCount > 0 ? (a.recipients?.filter((r) => r.status === 'replied').length || 0) / a.sentCount : 0;
+          const rB = b.sentCount > 0 ? (b.recipients?.filter((r) => r.status === 'replied').length || 0) / b.sentCount : 0;
+          return rB - rA;
+        }
+        if (sortBy === 'recipients') {
+          return (b.total || 0) - (a.total || 0);
+        }
+        // default 'newest'
+        return new Date(b.date) - new Date(a.date);
+      });
+  }, [campaigns, searchQuery, statusFilter, sortBy]);
+
   return (
     <div className="analytics-dashboard">
       <div className="dashboard-header card">
         <div>
           <h2>Campaign Analytics & History</h2>
-          <p className="step-hint">Track email performance, detect replies automatically, and launch follow-ups.</p>
+          <p className="step-hint">Track performance, delete campaigns, filter status, and launch follow-ups.</p>
         </div>
-        <button type="button" className="btn primary" onClick={onSwitchToCompose}>
-          + New Campaign
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          {totalCampaigns > 0 && (
+            <button
+              type="button"
+              className="btn danger sm"
+              onClick={onClearAllCampaigns}
+              title="Clear all stored campaign history"
+            >
+              🗑️ Clear All History
+            </button>
+          )}
+          <button type="button" className="btn primary" onClick={onSwitchToCompose}>
+            + New Campaign
+          </button>
+        </div>
       </div>
 
       {totalCampaigns === 0 ? (
@@ -1345,147 +1424,244 @@ function CampaignsDashboard({
             </div>
           </div>
 
+          {/* Filters & Search Toolbar */}
+          <div className="card campaign-toolbar-card">
+            <div className="toolbar-top-row">
+              <div className="search-field-wrap">
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="🔍 Search campaigns by name or subject..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+                {searchQuery && (
+                  <button type="button" className="clear-search-btn" onClick={() => setSearchQuery('')}>
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              <div className="sort-dropdown-wrap">
+                <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--ink-soft)' }}>Sort by:</label>
+                <select className="select-input" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+                  <option value="newest">Newest First</option>
+                  <option value="oldest">Oldest First</option>
+                  <option value="reply_rate">Highest Reply Rate</option>
+                  <option value="recipients">Most Recipients</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="toolbar-bottom-row">
+              <span className="filter-label">Filter by Status:</span>
+              <div className="tabs filter-status-tabs" style={{ marginBottom: 0 }}>
+                <button
+                  type="button"
+                  className={`tab ${statusFilter === 'all' ? 'active' : ''}`}
+                  onClick={() => setStatusFilter('all')}
+                >
+                  All ({campaigns.length})
+                </button>
+                <button
+                  type="button"
+                  className={`tab ${statusFilter === 'needs_followup' ? 'active' : ''}`}
+                  onClick={() => setStatusFilter('needs_followup')}
+                >
+                  🔵 Needs Follow-Up
+                </button>
+                <button
+                  type="button"
+                  className={`tab ${statusFilter === 'completed' ? 'active' : ''}`}
+                  onClick={() => setStatusFilter('completed')}
+                >
+                  🟢 Completed
+                </button>
+                <button
+                  type="button"
+                  className={`tab ${statusFilter === 'no_replies' ? 'active' : ''}`}
+                  onClick={() => setStatusFilter('no_replies')}
+                >
+                  🟠 No Replies
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Campaign History List */}
           <div className="card campaign-list-card">
-            <div className="card-header-row" style={{ marginBottom: '16px' }}>
-              <h3>Campaign History ({totalCampaigns})</h3>
+            <div className="card-header-row" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3>Campaign History ({filteredCampaigns.length})</h3>
+              {filteredCampaigns.length < totalCampaigns && (
+                <span className="count-pill">Showing {filteredCampaigns.length} of {totalCampaigns}</span>
+              )}
             </div>
 
-            <div className="campaign-items">
-              {campaigns.map((camp) => {
-                const isExpanded = expandedCampId === camp.id;
-                const campReplied = (camp.recipients || []).filter((r) => r.status === 'replied').length;
-                const campNoReply = (camp.recipients || []).filter((r) => r.status === 'no_reply').length;
-                const replyRate = camp.sentCount > 0 ? Math.round((campReplied / camp.sentCount) * 100) : 0;
-                const isSyncing = syncingCampaignId === camp.id;
+            {filteredCampaigns.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--ink-soft)' }}>
+                <p style={{ margin: 0, fontWeight: 500 }}>No campaigns match your selected search or status filter.</p>
+              </div>
+            ) : (
+              <div className="campaign-items">
+                {filteredCampaigns.map((camp) => {
+                  const isExpanded = expandedCampId === camp.id;
+                  const campReplied = (camp.recipients || []).filter((r) => r.status === 'replied').length;
+                  const campNoReply = (camp.recipients || []).filter((r) => r.status === 'no_reply').length;
+                  const replyRate = camp.sentCount > 0 ? Math.round((campReplied / camp.sentCount) * 100) : 0;
+                  const isSyncing = syncingCampaignId === camp.id;
+                  const campStatus = getCampaignStatus(camp);
 
-                const displayedRecipients = (camp.recipients || []).filter((r) => {
-                  if (filterMode === 'replied') return r.status === 'replied';
-                  if (filterMode === 'no_reply') return r.status === 'no_reply';
-                  return true;
-                });
+                  const displayedRecipients = (camp.recipients || []).filter((r) => {
+                    if (recipientFilterMode === 'replied') return r.status === 'replied';
+                    if (recipientFilterMode === 'no_reply') return r.status === 'no_reply';
+                    return true;
+                  });
 
-                return (
-                  <div key={camp.id} className="campaign-item-card">
-                    <div className="campaign-item-head" onClick={() => setExpandedCampId(isExpanded ? null : camp.id)}>
-                      <div className="camp-info">
-                        <span className="camp-date">{new Date(camp.date).toLocaleDateString()}</span>
-                        <h4>{camp.name}</h4>
-                        <span className="camp-sub">{camp.subject}</span>
-                      </div>
-
-                      <div className="camp-metrics">
-                        <span className="metric-pill">
-                          <span>Delivered:</span> {camp.sentCount} / {camp.total}
-                        </span>
-                        <span className={`metric-pill ${replyRate > 0 ? 'success' : ''}`}>
-                          <span>Reply Rate:</span> {replyRate}% ({campReplied})
-                        </span>
-                        <button type="button" className="link-btn">
-                          {isExpanded ? 'Hide details ▲' : 'View details ▼'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {isExpanded && (
-                      <div className="campaign-expanded-body">
-                        <div className="action-bar">
-                          <div className="filter-tabs">
-                            <button
-                              type="button"
-                              className={`tab ${filterMode === 'all' ? 'active' : ''}`}
-                              onClick={() => setFilterMode('all')}
-                            >
-                              All ({camp.recipients.length})
-                            </button>
-                            <button
-                              type="button"
-                              className={`tab ${filterMode === 'replied' ? 'active' : ''}`}
-                              onClick={() => setFilterMode('replied')}
-                            >
-                              Replied ({campReplied})
-                            </button>
-                            <button
-                              type="button"
-                              className={`tab ${filterMode === 'no_reply' ? 'active' : ''}`}
-                              onClick={() => setFilterMode('no_reply')}
-                            >
-                              No Reply ({campNoReply})
-                            </button>
+                  return (
+                    <div key={camp.id} className="campaign-item-card">
+                      <div className="campaign-item-head" onClick={() => setExpandedCampId(isExpanded ? null : camp.id)}>
+                        <div className="camp-info">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                            <span className="camp-date">{new Date(camp.date).toLocaleDateString()}</span>
+                            <span className={campStatus.colorClass} style={{ fontSize: '11.5px', padding: '2px 8px' }}>
+                              {campStatus.label}
+                            </span>
                           </div>
-
-                          <div className="right-actions">
-                            <button
-                              type="button"
-                              className="btn secondary sm"
-                              disabled={isSyncing || !email || !appPassword}
-                              onClick={() => onSyncReplies(camp.id)}
-                              title={!email || !appPassword ? 'Enter email & password in Step 1 to auto-check IMAP' : 'Check IMAP Inbox for replies'}
-                            >
-                              {isSyncing ? 'Syncing IMAP...' : '🔄 Auto-Detect Replies'}
-                            </button>
-
-                            <button
-                              type="button"
-                              className="btn primary sm"
-                              disabled={campNoReply === 0}
-                              onClick={() => onLaunchFollowup(camp)}
-                            >
-                              ⚡ Launch Follow-Up to Unreplied ({campNoReply})
-                            </button>
-
-                            <button
-                              type="button"
-                              className="btn danger sm link-btn"
-                              onClick={() => onDeleteCampaign(camp.id)}
-                            >
-                              Delete
-                            </button>
-                          </div>
+                          <h4>{camp.name}</h4>
+                          <span className="camp-sub">{camp.subject}</span>
                         </div>
 
-                        <div className="recipient-status-table-container">
-                          <table className="recipient-status-table">
-                            <thead>
-                              <tr>
-                                <th>Recipient Email</th>
-                                <th>Name</th>
-                                <th>Reply Status</th>
-                                <th>Manual Action</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {displayedRecipients.map((r, i) => (
-                                <tr key={i}>
-                                  <td className="mono">{r.email}</td>
-                                  <td>{r.name || '—'}</td>
-                                  <td>
-                                    {r.status === 'replied' ? (
-                                      <span className="pill success">🟢 Reply Received</span>
-                                    ) : (
-                                      <span className="pill warning">⏳ Pending Follow-Up</span>
-                                    )}
-                                  </td>
-                                  <td>
-                                    <button
-                                      type="button"
-                                      className="link-btn"
-                                      onClick={() => onToggleRecipientReply(camp.id, r.email)}
-                                    >
-                                      {r.status === 'replied' ? 'Mark as No Reply' : 'Mark as Replied'}
-                                    </button>
-                                  </td>
+                        <div className="camp-metrics">
+                          <span className="metric-pill">
+                            <span>Delivered:</span> {camp.sentCount} / {camp.total}
+                          </span>
+                          <span className={`metric-pill ${replyRate > 0 ? 'success' : ''}`}>
+                            <span>Reply Rate:</span> {replyRate}% ({campReplied})
+                          </span>
+                          <button
+                            type="button"
+                            className="btn danger sm link-btn"
+                            style={{ marginLeft: '4px' }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (window.confirm(`Delete campaign "${camp.name}"?`)) {
+                                onDeleteCampaign(camp.id);
+                              }
+                            }}
+                            title="Delete Campaign"
+                          >
+                            🗑️ Delete
+                          </button>
+                          <button type="button" className="link-btn">
+                            {isExpanded ? 'Hide details ▲' : 'View details ▼'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {isExpanded && (
+                        <div className="campaign-expanded-body">
+                          <div className="action-bar">
+                            <div className="filter-tabs">
+                              <button
+                                type="button"
+                                className={`tab ${recipientFilterMode === 'all' ? 'active' : ''}`}
+                                onClick={() => setRecipientFilterMode('all')}
+                              >
+                                All ({camp.recipients.length})
+                              </button>
+                              <button
+                                type="button"
+                                className={`tab ${recipientFilterMode === 'replied' ? 'active' : ''}`}
+                                onClick={() => setRecipientFilterMode('replied')}
+                              >
+                                Replied ({campReplied})
+                              </button>
+                              <button
+                                type="button"
+                                className={`tab ${recipientFilterMode === 'no_reply' ? 'active' : ''}`}
+                                onClick={() => setRecipientFilterMode('no_reply')}
+                              >
+                                No Reply ({campNoReply})
+                              </button>
+                            </div>
+
+                            <div className="right-actions">
+                              <button
+                                type="button"
+                                className="btn secondary sm"
+                                disabled={isSyncing || !email || !appPassword}
+                                onClick={() => onSyncReplies(camp.id)}
+                                title={!email || !appPassword ? 'Enter email & password in Step 1 to auto-check IMAP' : 'Check IMAP Inbox for replies'}
+                              >
+                                {isSyncing ? 'Syncing IMAP...' : '🔄 Auto-Detect Replies'}
+                              </button>
+
+                              <button
+                                type="button"
+                                className="btn primary sm"
+                                disabled={campNoReply === 0}
+                                onClick={() => onLaunchFollowup(camp)}
+                              >
+                                ⚡ Launch Follow-Up to Unreplied ({campNoReply})
+                              </button>
+
+                              <button
+                                type="button"
+                                className="btn danger sm link-btn"
+                                onClick={() => {
+                                  if (window.confirm(`Delete campaign "${camp.name}"?`)) {
+                                    onDeleteCampaign(camp.id);
+                                  }
+                                }}
+                              >
+                                🗑️ Delete Campaign
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="recipient-status-table-container">
+                            <table className="recipient-status-table">
+                              <thead>
+                                <tr>
+                                  <th>Recipient Email</th>
+                                  <th>Name</th>
+                                  <th>Reply Status</th>
+                                  <th>Manual Action</th>
                                 </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                              </thead>
+                              <tbody>
+                                {displayedRecipients.map((r, i) => (
+                                  <tr key={i}>
+                                    <td className="mono">{r.email}</td>
+                                    <td>{r.name || '—'}</td>
+                                    <td>
+                                      {r.status === 'replied' ? (
+                                        <span className="pill success">🟢 Reply Received</span>
+                                      ) : (
+                                        <span className="pill warning">⏳ Pending Follow-Up</span>
+                                      )}
+                                    </td>
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="link-btn"
+                                        onClick={() => onToggleRecipientReply(camp.id, r.email)}
+                                      >
+                                        {r.status === 'replied' ? 'Mark as No Reply' : 'Mark as Replied'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </>
       )}
